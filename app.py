@@ -47,7 +47,27 @@ def detect_plagas():
             conf = float(box.conf[0])
             detections.append({"plaga": cls_name, "confianza": round(conf, 2)})
         
-        return jsonify({"detecciones": detections, "total": len(detections)})
+        # Ruta de la imagen con detecciones dibujados
+        output_dir = Path(results[0].save_dir)
+        output_img = output_dir / file.filename
+        
+        return jsonify({
+            "detecciones": detections,
+            "total": len(detections),
+            "imagen_resultado": f"/imagen/{file.filename}"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/imagen/<filename>")
+def get_imagen(filename):
+    """Devuelve la imagen con detecciones dibujados"""
+    try:
+        img_path = Path("runs/detect/predict") / filename
+        if not img_path.exists():
+            return jsonify({"error": "Image not found"}), 404
+        from flask import send_file
+        return send_file(img_path, mimetype='image/jpeg')
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
