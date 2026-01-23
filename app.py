@@ -1,10 +1,12 @@
 from flask import Flask, request, jsonify, send_file
 from ultralytics import YOLO
 from pathlib import Path
+from PIL import Image
 import os
 import sys
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
 
 # Obtener directorio de trabajo actual
 WORK_DIR = Path(os.getcwd())
@@ -12,19 +14,31 @@ WORK_DIR = Path(os.getcwd())
 # Configurar modelo - descargar si no existe o está corrupto
 MODEL_PATH = Path("best.pt")
 
-try:
-    if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 10_000_000:  # Si < 10 MB, descarga
-        print(f"[INFO] Modelo no encontrado o corrupto. Descargando YOLOv8n...", file=sys.stderr)
-        model = YOLO('yolov8n.pt')  # Descargar modelo nano preentrenado
-        model.save(str(MODEL_PATH))
-        print(f"[INFO] Modelo guardado en {MODEL_PATH}", file=sys.stderr)
-    else:
-        print(f"[INFO] Cargando modelo desde {MODEL_PATH}", file=sys.stderr)
-        model = YOLO(str(MODEL_PATH))
-except Exception as e:
-    print(f"[ERROR] No se pudo cargar el modelo: {e}", file=sys.stderr)
-    print(f"[INFO] Descargando YOLOv8n como respaldo...", file=sys.stderr)
-    model = YOLO('yolov8n.pt')
+def load_model():
+    """Carga el modelo con manejo de errores"""
+    try:
+        if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 10_000_000:
+            print(f"[INFO] Descargando YOLOv8n...", file=sys.stderr)
+            model = YOLO('yolov8n.pt')
+            model.save(str(MODEL_PATH))
+            print(f"[INFO] Modelo guardado", file=sys.stderr)
+        else:
+            print(f"[INFO] Cargando modelo local...", file=sys.stderr)
+            model = YOLO(str(MODEL_PATH))
+        return model
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return YOLO('yolov8n.pt')
+
+model = load_model()
+
+def optimize_image(img_path, max_size=640):
+    """Comprime la imagen para procesar más rápido"""
+    img = Image.open(img_path)
+    if max(img.size) > max_size:
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        img.save(img_path, quality=85)
+    return img_path
 
 # Carpeta para subir imágenes
 UPLOAD_FOLDER = Path("uploads")
@@ -79,34 +93,36 @@ def predict_image():
 @app.route("/detect", methods=["POST"])
 def detect_plagas():
     if 'file' not in request.files:
-        return jsonify({"error": "No se envió ninguna imagen. Usa multipart/form-data con campo 'file'"}), 400
+        return jsonify({"error": "No se envió ninguna imagen"}), 400
 
     file = request.files['file']
     if file.filename == "":
         return jsonify({"error": "Archivo sin nombre"}), 400
 
-    # Guardar la imagen subida
-    img_path = UPLOAD_FOLDER / file.filename
-    file.save(img_path)
-
-    # Ejecutar predicción
-    results = model.predict(source=str(img_path), save=True)
-
-    # Imagen con detecciones
-    output_path = Path(results[0].save_dir) / file.filename
-
-    # Extraer detecciones
-    detections = []
-    for box in results[0].boxes:
-        cls_id = int(box.cls[0])
-        cls_name = model.names[cls_id]
-        conf = float(box.conf[0])
-        detections.append({"plaga": cls_name, "confianza": round(conf, 2)})
-
-    return jsonify({
-        "detecciones": detections,
-        "imagen_resultado": str(output_path)
-    })
+    try:
+        # Guardar y optimizar imagen
+        img_path = UPLOAD_FOLDER / file.filename
+        file.save(img_path)
+        optimize_image(img_path)
+        
+        # Predicción
+        results = model.predict(source=str(img_path), save=True, conf=0.5)
+        
+        output_path = Path(results[0].save_dir) / file.filename
+        
+        detections = []
+        for box in results[0].boxes:
+            cls_id = int(box.cls[0])
+            cls_name = model.names[cls_id]
+            conf = float(box.conf[0])
+            detections.append({"plaga": cls_name, "confianza": round(conf, 2)})
+        
+        return jsonify({
+            "detecciones": detections,
+            "imagen_resultado": str(output_path)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/image/<filename>")
 def get_image(filename):
