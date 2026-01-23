@@ -5,27 +5,30 @@ import os
 import sys
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 WORK_DIR = Path(os.getcwd())
 MODEL_PATH = Path("best.pt")
 UPLOAD_FOLDER = Path("uploads")
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
-# Cargar modelo al iniciar
-print("[INFO] Cargando modelo...", file=sys.stderr)
+# Lazy loading - cargar modelo solo cuando se necesita
 model = None
-try:
-    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 1_000_000:
-        model = YOLO(str(MODEL_PATH))
-        print(f"[INFO] Modelo local cargado", file=sys.stderr)
-    else:
-        print(f"[INFO] Descargando YOLOv8n...", file=sys.stderr)
-        model = YOLO('yolov8n.pt')
-        print(f"[INFO] Modelo descargado", file=sys.stderr)
-except Exception as e:
-    print(f"[ERROR] {e}", file=sys.stderr)
-    model = YOLO('yolov8n.pt')
+
+def get_model():
+    global model
+    if model is None:
+        print("[INFO] Cargando modelo...", file=sys.stderr)
+        try:
+            if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 1_000_000:
+                model = YOLO(str(MODEL_PATH))
+            else:
+                model = YOLO('yolov8n.pt')
+            print("[INFO] Modelo cargado", file=sys.stderr)
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            model = YOLO('yolov8n.pt')
+    return model
 
 # Carpeta para subir imágenes
 UPLOAD_FOLDER = Path("uploads")
@@ -33,7 +36,7 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "message": "API de detección de plagas activa. Usa /predict_image o /detect."})
+    return jsonify({"status": "ok", "message": "API activa"})
 
 @app.route("/predict_image")
 def predict_image():
@@ -80,23 +83,18 @@ def predict_image():
 @app.route("/detect", methods=["POST"])
 def detect_plagas():
     if 'file' not in request.files:
-        return jsonify({"error": "No file sent"}), 400
+        return jsonify({"error": "No file"}), 400
 
     file = request.files['file']
     if file.filename == "":
         return jsonify({"error": "No filename"}), 400
 
-    if model is None:
-        return jsonify({"error": "Model not loaded"}), 500
-
     try:
-        # Guardar imagen
+        model = get_model()
         img_path = UPLOAD_FOLDER / file.filename
         file.save(img_path)
         
-        # Predicción
         results = model.predict(source=str(img_path), save=True, conf=0.25)
-        
         output_path = Path(results[0].save_dir) / file.filename
         
         detections = []
