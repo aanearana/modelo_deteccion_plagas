@@ -1,44 +1,31 @@
 from flask import Flask, request, jsonify, send_file
 from ultralytics import YOLO
 from pathlib import Path
-from PIL import Image
 import os
 import sys
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max
 
-# Obtener directorio de trabajo actual
 WORK_DIR = Path(os.getcwd())
-
-# Configurar modelo - descargar si no existe o está corrupto
 MODEL_PATH = Path("best.pt")
+UPLOAD_FOLDER = Path("uploads")
+UPLOAD_FOLDER.mkdir(exist_ok=True)
 
-def load_model():
-    """Carga el modelo con manejo de errores"""
-    try:
-        if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 10_000_000:
-            print(f"[INFO] Descargando YOLOv8n...", file=sys.stderr)
-            model = YOLO('yolov8n.pt')
-            model.save(str(MODEL_PATH))
-            print(f"[INFO] Modelo guardado", file=sys.stderr)
-        else:
-            print(f"[INFO] Cargando modelo local...", file=sys.stderr)
-            model = YOLO(str(MODEL_PATH))
-        return model
-    except Exception as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        return YOLO('yolov8n.pt')
-
-model = load_model()
-
-def optimize_image(img_path, max_size=640):
-    """Comprime la imagen para procesar más rápido"""
-    img = Image.open(img_path)
-    if max(img.size) > max_size:
-        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        img.save(img_path, quality=85)
-    return img_path
+# Cargar modelo al iniciar
+print("[INFO] Cargando modelo...", file=sys.stderr)
+model = None
+try:
+    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 1_000_000:
+        model = YOLO(str(MODEL_PATH))
+        print(f"[INFO] Modelo local cargado", file=sys.stderr)
+    else:
+        print(f"[INFO] Descargando YOLOv8n...", file=sys.stderr)
+        model = YOLO('yolov8n.pt')
+        print(f"[INFO] Modelo descargado", file=sys.stderr)
+except Exception as e:
+    print(f"[ERROR] {e}", file=sys.stderr)
+    model = YOLO('yolov8n.pt')
 
 # Carpeta para subir imágenes
 UPLOAD_FOLDER = Path("uploads")
@@ -93,20 +80,22 @@ def predict_image():
 @app.route("/detect", methods=["POST"])
 def detect_plagas():
     if 'file' not in request.files:
-        return jsonify({"error": "No se envió ninguna imagen"}), 400
+        return jsonify({"error": "No file sent"}), 400
 
     file = request.files['file']
     if file.filename == "":
-        return jsonify({"error": "Archivo sin nombre"}), 400
+        return jsonify({"error": "No filename"}), 400
+
+    if model is None:
+        return jsonify({"error": "Model not loaded"}), 500
 
     try:
-        # Guardar y optimizar imagen
+        # Guardar imagen
         img_path = UPLOAD_FOLDER / file.filename
         file.save(img_path)
-        optimize_image(img_path)
         
         # Predicción
-        results = model.predict(source=str(img_path), save=True, conf=0.5)
+        results = model.predict(source=str(img_path), save=True, conf=0.25)
         
         output_path = Path(results[0].save_dir) / file.filename
         
@@ -117,10 +106,7 @@ def detect_plagas():
             conf = float(box.conf[0])
             detections.append({"plaga": cls_name, "confianza": round(conf, 2)})
         
-        return jsonify({
-            "detecciones": detections,
-            "imagen_resultado": str(output_path)
-        })
+        return jsonify({"detecciones": detections, "imagen_resultado": str(output_path)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
